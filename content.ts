@@ -1,6 +1,11 @@
 import { Storage } from "@plasmohq/storage"
 import { convertImageToWebp } from "./utils/webp"
-
+import type { PlasmoCSConfig } from "plasmo"
+export const config: PlasmoCSConfig = {
+  matches: ["https://*.dcinside.com/*"],   
+  run_at: "document_end",                  
+  all_frames: false                      
+}
 const storage = new Storage()
 
 async function initUploader() {
