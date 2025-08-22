@@ -1,15 +1,19 @@
 {
   "name": "dcinside-autowebp",
-  "displayName": "Dcinside autowebp",
-  "version": "0.0.1",
+  "displayName": "dcinside-autowebp",
+  "version": "1.0.0",
   "description": "dcinside-autowebp",
   "author": "댕",
+  "repository": "https://github.com/stellium1/dcinside-autowebp",
   "scripts": {
     "dev": "plasmo dev",
     "build": "plasmo build",
     "package": "plasmo package"
   },
   "dependencies": {
+    "@plasmohq/messaging": "^0.7.2",
+    "@plasmohq/storage": "^1.15.0",
+    "build": "^0.1.4",
     "plasmo": "0.90.5",
     "react": "18.2.0",
     "react-dom": "18.2.0"
@@ -25,7 +29,12 @@
   },
   "manifest": {
     "host_permissions": [
-      "https://*/*"
-    ]
+      "https://*.dcinside.com/*"
+    ],
+    "browser_specific_settings": {
+      "gecko": {
+        "id": "dcinside-autowebp@stellium"
+      }
+    }
   }
 }
