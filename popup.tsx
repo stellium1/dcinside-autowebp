@@ -219,7 +219,7 @@ export default function OptionsIndex() {
 
           {renderToggle(
             "드래그 앤 드롭시 WebP 압축",
-            "드래그로 사진 추가할 때 자동으로 WebP로 압축합니다.",
+            "드래그로 사진을 추가할 때 자동으로 WebP로 압축합니다.",
             !!compressOnDrag,
             (v) => setCompressOnDrag(v),
             "compressOnDrag",
@@ -228,7 +228,7 @@ export default function OptionsIndex() {
 
           {renderToggle(
             "직접 사진 추가시 WebP 압축",
-            "파일 선택(업로드)로 추가할 때 자동으로 WebP로 압축합니다.",
+            "파일 선택(업로드)으로 추가할 때 자동으로 WebP로 압축합니다.",
             !!compressOnUpload,
             (v) => setCompressOnUpload(v),
             "compressOnUpload",
