@@ -16,7 +16,8 @@ WebP로 인코딩하여 업로드할 시 열화 현상을 겪지 않을 수 있�
 
 ## 설치
 [Chrome 웹스토어](https://chromewebstore.google.com/detail/dcinside-autowebp/eiogifjfognhbjniaaaleilmdnhmgmoi?hl=ko) <br>
-Firefox (심사중)
+[Firefox](https://addons.mozilla.org/ko/firefox/addon/dcinside-autowebp/) <br>
+
 
 ## 설정
 ![Image](https://github.com/user-attachments/assets/395d7596-38f4-49fc-9efa-3140579fa765) <br>
