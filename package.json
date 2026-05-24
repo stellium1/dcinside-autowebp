@@ -1,31 +1,31 @@
 {
   "name": "dcinside-autowebp",
   "displayName": "dcinside-autowebp",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "dcinside-autowebp",
   "author": "댕",
   "repository": "https://github.com/stellium1/dcinside-autowebp",
   "scripts": {
     "dev": "plasmo dev",
     "build": "plasmo build --hoist --zip --target=chrome-mv3 && plasmo build --hoist --zip --target=firefox-mv2",
-    "package": "plasmo package"
+    "package": "plasmo package",
+    "typecheck": "tsc --noEmit --incremental false"
   },
   "dependencies": {
-    "@plasmohq/messaging": "^0.7.2",
     "@plasmohq/storage": "^1.15.0",
-    "build": "^0.1.4",
-    "plasmo": "0.90.5",
-    "react": "18.2.0",
-    "react-dom": "18.2.0"
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
   },
   "devDependencies": {
-    "@ianvs/prettier-plugin-sort-imports": "4.1.1",
-    "@types/chrome": "0.0.258",
-    "@types/node": "20.11.5",
-    "@types/react": "18.2.48",
-    "@types/react-dom": "18.2.18",
-    "prettier": "3.2.4",
-    "typescript": "5.3.3"
+    "@ianvs/prettier-plugin-sort-imports": "4.7.1",
+    "@types/chrome": "0.1.42",
+    "@types/node": "25.9.1",
+    "@types/react": "19.2.15",
+    "@types/react-dom": "19.2.3",
+    "plasmo": "0.90.5",
+    "prettier": "3.8.3",
+    "svgo": "3.3.3",
+    "typescript": "6.0.3"
   },
   "manifest": {
     "host_permissions": [
