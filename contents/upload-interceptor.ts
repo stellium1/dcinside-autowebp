@@ -7,9 +7,24 @@ type Settings = {
   quality: number
 }
 
+type UploadSource = "drag" | "paste" | "upload"
+
 type UploadContext = {
+  completed: number
   expiresAt: number
-  source: "drag"
+  processed: number
+  source: UploadSource
+  total?: number
+}
+
+type ProgressDetail = {
+  current?: number
+  message?: string
+  percent?: number
+  phase: "converting" | "uploading"
+  source?: UploadSource
+  status: "active" | "done" | "error"
+  total?: number
 }
 
 export const config: PlasmoCSConfig = {
@@ -21,6 +36,7 @@ export const config: PlasmoCSConfig = {
 
 const SETTINGS_EVENT_NAME = "dcinside-autowebp:settings"
 const UPLOAD_CONTEXT_EVENT_NAME = "dcinside-autowebp:upload-context"
+const PROGRESS_EVENT_NAME = "dcinside-autowebp:progress"
 const WEBP_MIME_TYPE = "image/webp"
 const CONTEXT_TTL_MS = 15000
 const CONVERTIBLE_IMAGE_TYPE_PATTERN =
@@ -54,11 +70,15 @@ function handleSettingsEvent(event: Event): void {
 }
 
 function handleUploadContextEvent(event: Event): void {
-  if (getEventDetail(event) !== "drag") return
+  const context = readUploadContext(getEventDetail(event))
+  if (!context) return
 
   uploadContext = {
+    completed: 0,
     expiresAt: Date.now() + CONTEXT_TTL_MS,
-    source: "drag"
+    processed: 0,
+    source: context.source,
+    total: context.total
   }
 }
 
@@ -69,14 +89,35 @@ function patchFetch(): void {
     input: RequestInfo | URL,
     init?: RequestInit
   ): Promise<Response> => {
-    if (init?.body instanceof FormData) {
-      return originalFetch.call(window, input, {
-        ...init,
-        body: await convertFormData(init.body)
-      })
+    if (!(init?.body instanceof FormData)) {
+      return originalFetch.call(window, input, init)
     }
 
-    return originalFetch.call(window, input, init)
+    const { context, fileCount, formData } = await prepareFormData(init.body)
+    if (!context) {
+      return originalFetch.call(window, input, init)
+    }
+
+    reportUploadStart(context, fileCount)
+
+    try {
+      const response = await originalFetch.call(window, input, {
+        ...init,
+        body: formData
+      })
+
+      reportUploadEnd(context, response.ok, fileCount)
+      return response
+    } catch (error) {
+      reportProgress({
+        message: "이미지 업로드 실패",
+        phase: "uploading",
+        source: context.source,
+        status: "error"
+      })
+      clearUploadContext(context)
+      throw error
+    }
   }
 }
 
@@ -92,8 +133,14 @@ function patchXhr(): void {
       return
     }
 
-    convertFormData(body)
-      .then((convertedBody) => originalSend.call(this, convertedBody))
+    prepareFormData(body)
+      .then(({ context, fileCount, formData }) => {
+        if (context) {
+          attachXhrUploadProgress(this, context, fileCount)
+        }
+
+        originalSend.call(this, formData)
+      })
       .catch((error) => {
         showConversionError(error)
         try {
@@ -103,34 +150,172 @@ function patchXhr(): void {
   }
 }
 
-async function convertFormData(formData: FormData): Promise<FormData> {
-  if (!shouldConvertCurrentUpload()) return formData
+async function prepareFormData(formData: FormData): Promise<{
+  context: UploadContext | null
+  fileCount: number
+  formData: FormData
+}> {
+  const context = getActiveUploadContext()
+  if (!context) return { context: null, fileCount: 0, formData }
+
+  const entries = Array.from(formData.entries())
+  const fileCount = entries.filter(([, value]) => value instanceof File).length
+  if (fileCount === 0) return { context: null, fileCount: 0, formData }
+  if (!shouldConvertContext(context)) return { context, fileCount, formData }
 
   let converted = false
   const nextFormData = new FormData()
+  const total = getContextTotal(context, fileCount)
 
-  for (const [name, value] of formData.entries()) {
+  if (fileCount > 0) {
+    reportProgress({
+      current: getContextCurrent(context),
+      message: "이미지 WebP 변환 중",
+      phase: "converting",
+      source: context.source,
+      status: "active",
+      total
+    })
+  }
+
+  for (const [name, value] of entries) {
     if (!(value instanceof File) || !shouldConvertFile(value)) {
       nextFormData.append(name, value)
+      if (value instanceof File) {
+        context.processed += 1
+        reportProgress({
+          current: getContextCurrent(context),
+          message: "이미지 WebP 변환 중",
+          phase: "converting",
+          source: context.source,
+          status: "active",
+          total
+        })
+      }
       continue
     }
 
     const nextFile = await convertImageToWebp(value, currentSettings.quality)
     nextFormData.append(name, nextFile, nextFile.name)
     converted = true
+    context.processed += 1
+    reportProgress({
+      current: getContextCurrent(context),
+      message: "이미지 WebP 변환 중",
+      phase: "converting",
+      source: context.source,
+      status: "active",
+      total
+    })
   }
 
-  return converted ? nextFormData : formData
+  return { context, fileCount, formData: converted ? nextFormData : formData }
 }
 
-function shouldConvertCurrentUpload(): boolean {
-  if (!currentSettings.enabled || !uploadContext) return false
+function getActiveUploadContext(): UploadContext | null {
+  if (!currentSettings.enabled || !uploadContext) return null
   if (uploadContext.expiresAt < Date.now()) {
     uploadContext = null
-    return false
+    return null
   }
 
-  return uploadContext.source === "drag" && currentSettings.compressOnDrag
+  return uploadContext
+}
+
+function shouldConvertContext(context: UploadContext): boolean {
+  return context.source === "drag" && currentSettings.compressOnDrag
+}
+
+function clearUploadContext(context: UploadContext): void {
+  if (uploadContext === context) {
+    uploadContext = null
+  }
+}
+
+function getContextTotal(
+  context: UploadContext,
+  fallback: number
+): number | undefined {
+  return context.total ?? (fallback > 0 ? fallback : undefined)
+}
+
+function getContextCurrent(context: UploadContext): number | undefined {
+  const total = getContextTotal(context, 0)
+  const current = Math.max(context.completed, context.processed)
+
+  if (!total) return current > 0 ? current : undefined
+  return Math.min(total, current)
+}
+
+function reportUploadStart(context: UploadContext, fileCount: number): void {
+  reportProgress({
+    current: getUploadCurrent(context, fileCount),
+    message: "이미지 업로드 중",
+    phase: "uploading",
+    source: context.source,
+    status: "active",
+    total: getContextTotal(context, 0)
+  })
+}
+
+function reportUploadEnd(
+  context: UploadContext,
+  ok: boolean,
+  fileCount: number
+): void {
+  if (ok) {
+    context.completed += Math.max(1, fileCount)
+  }
+
+  const total = getContextTotal(context, fileCount)
+  const isComplete = ok && (!total || context.completed >= total)
+
+  reportProgress({
+    current: getContextCurrent(context),
+    message: ok
+      ? isComplete
+        ? "이미지 업로드 완료"
+        : "이미지 업로드 중"
+      : "이미지 업로드 실패",
+    percent: isComplete ? 100 : undefined,
+    phase: "uploading",
+    source: context.source,
+    status: ok ? (isComplete ? "done" : "active") : "error",
+    total
+  })
+
+  if (!ok || isComplete) {
+    clearUploadContext(context)
+  }
+}
+
+function attachXhrUploadProgress(
+  xhr: XMLHttpRequest,
+  context: UploadContext,
+  fileCount: number
+): void {
+  reportUploadStart(context, fileCount)
+
+  xhr.addEventListener(
+    "loadend",
+    () => {
+      const ok = xhr.status >= 200 && xhr.status < 400
+      reportUploadEnd(context, ok, fileCount)
+    },
+    { once: true }
+  )
+}
+
+function getUploadCurrent(
+  context: UploadContext,
+  fileCount: number
+): number | undefined {
+  const total = getContextTotal(context, fileCount)
+  const current = getContextCurrent(context) ?? 0
+  const active = context.completed + 1
+
+  if (!total) return Math.max(current, active)
+  return Math.min(total, Math.max(current, active))
 }
 
 function shouldConvertFile(file: File): boolean {
@@ -240,7 +425,7 @@ function readBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback
 }
 
-function isObject(value: unknown): value is Partial<Settings> {
+function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
@@ -248,7 +433,57 @@ function getEventDetail(event: Event): unknown {
   return "detail" in event ? (event as CustomEvent<unknown>).detail : undefined
 }
 
+function readUploadContext(
+  value: unknown
+): { source: UploadSource; total?: number } | null {
+  if (typeof value === "string") {
+    const source = readUploadSource(value)
+    if (source) return { source }
+
+    try {
+      return readUploadContext(JSON.parse(value))
+    } catch {
+      return null
+    }
+  }
+
+  if (!isObject(value)) return null
+
+  const source = readUploadSource(value.source)
+  if (!source) return null
+
+  return {
+    source,
+    total: readPositiveInteger(value.total)
+  }
+}
+
+function readUploadSource(value: unknown): UploadSource | null {
+  return value === "drag" || value === "paste" || value === "upload"
+    ? value
+    : null
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined
+}
+
+function reportProgress(detail: ProgressDetail): void {
+  window.dispatchEvent(
+    new CustomEvent(PROGRESS_EVENT_NAME, {
+      detail: JSON.stringify(detail)
+    })
+  )
+}
+
 function showConversionError(error: unknown): void {
   console.warn("[dcinside-autowebp] Image conversion failed", error)
+  reportProgress({
+    message: "이미지 처리 실패",
+    phase: "converting",
+    status: "error"
+  })
   window.alert("이미지를 WebP로 변환하지 못해 업로드를 중단했습니다.")
 }

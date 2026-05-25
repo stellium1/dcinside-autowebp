@@ -14,6 +14,11 @@ import {
   hasUploadImageExtension,
   isConvertibleImage
 } from "../utils/webp"
+import {
+  initProgressOverlay,
+  reportProgress,
+  type UploadSource
+} from "./progress"
 
 const DROP_HANDLER_MARKER = "__dc_webp_drop_attached"
 const EDITOR_SELECTOR = ".note-editable, .note-editor"
@@ -47,6 +52,7 @@ type ProcessFilesOptions = {
   forceUnknownImageConversion?: boolean
   quality: number
   shouldConvert: boolean
+  source: UploadSource
 }
 
 let currentSettings: Settings = DEFAULT_SETTINGS
@@ -63,6 +69,7 @@ export async function initUploader(storage: Storage): Promise<void> {
   initialized = true
 
   attachSettingsWatcher(storage)
+  initProgressOverlay()
   publishPageSettings()
   attachUploadHandlers()
   observeUploaderChanges()
@@ -161,10 +168,13 @@ async function handleFileInputChange(event: Event): Promise<void> {
   try {
     const files = await processFiles(input.files, {
       quality: currentSettings.quality,
-      shouldConvert: true
+      shouldConvert: true,
+      source: "upload"
     })
 
     replaceInputFiles(input, files)
+    publishUploadContext("upload", files.length)
+    reportUploadQueued("upload", files.length)
     dispatchChange(input)
   } catch (error) {
     showConversionError(error)
@@ -195,10 +205,13 @@ async function handleImagePaste(event: ClipboardEvent): Promise<void> {
     const processedFiles = await processFiles(files, {
       forceUnknownImageConversion: true,
       quality: currentSettings.quality,
-      shouldConvert: true
+      shouldConvert: true,
+      source: "paste"
     })
 
     replaceInputFiles(fileInput, processedFiles)
+    publishUploadContext("paste", processedFiles.length)
+    reportUploadQueued("paste", processedFiles.length)
     dispatchChange(fileInput)
   } catch (error) {
     showConversionError(error)
@@ -237,8 +250,17 @@ async function handleFileDrop(event: Event): Promise<void> {
   const editorDropTarget = fileInput ? null : findEditorDropTarget(event)
   if (!fileInput && !editorDropTarget) return
   if (!fileInput) {
-    if (hasConvertibleDropFile(files)) {
-      publishUploadContext("drag")
+    if (hasTrackableDropFile(files)) {
+      publishUploadContext("drag", files.length)
+      reportProgress({
+        current: 0,
+        message: "이미지 업로드 준비 중",
+        percent: 0,
+        phase: "converting",
+        source: "drag",
+        status: "active",
+        total: files.length
+      })
     }
     return
   }
@@ -250,10 +272,13 @@ async function handleFileDrop(event: Event): Promise<void> {
   try {
     const processedFiles = await processFiles(files, {
       quality: currentSettings.quality,
-      shouldConvert: true
+      shouldConvert: true,
+      source: "drag"
     })
 
     replaceInputFiles(fileInput, processedFiles)
+    publishUploadContext("drag", processedFiles.length)
+    reportUploadQueued("drag", processedFiles.length)
     dispatchChange(fileInput)
   } catch (error) {
     showConversionError(error)
@@ -264,10 +289,33 @@ async function processFiles(
   files: File[] | FileList,
   options: ProcessFilesOptions
 ): Promise<File[]> {
+  const uploadFiles = Array.from(files)
   const processedFiles: File[] = []
 
-  for (const file of Array.from(files)) {
+  if (uploadFiles.length > 0 && options.shouldConvert) {
+    reportProgress({
+      current: 0,
+      message: "이미지 WebP 변환 중",
+      phase: "converting",
+      source: options.source,
+      status: "active",
+      total: uploadFiles.length
+    })
+  }
+
+  for (const [index, file] of uploadFiles.entries()) {
     processedFiles.push(await processFile(file, options))
+
+    if (options.shouldConvert) {
+      reportProgress({
+        current: index + 1,
+        message: "이미지 WebP 변환 중",
+        phase: "converting",
+        source: options.source,
+        status: "active",
+        total: uploadFiles.length
+      })
+    }
   }
 
   return processedFiles
@@ -456,10 +504,12 @@ function getDroppedFiles(event: Event): FileList | null {
   return files?.length ? files : null
 }
 
-function hasConvertibleDropFile(files: FileList): boolean {
+function hasTrackableDropFile(files: FileList): boolean {
   return Array.from(files).some((file) => {
     const uploadFile = ensureImageFileExtension(file)
     return (
+      isImageFile(uploadFile) ||
+      hasUploadImageExtension(uploadFile.name) ||
       isConvertibleImage(uploadFile) ||
       (uploadFile.type === "" && !hasUploadImageExtension(uploadFile.name))
     )
@@ -474,12 +524,26 @@ function publishPageSettings(): void {
   )
 }
 
-function publishUploadContext(source: "drag"): void {
+function publishUploadContext(source: UploadSource, total: number): void {
   window.dispatchEvent(
     new CustomEvent(UPLOAD_CONTEXT_EVENT_NAME, {
-      detail: source
+      detail: JSON.stringify({
+        source,
+        total
+      })
     })
   )
+}
+
+function reportUploadQueued(source: UploadSource, total: number): void {
+  reportProgress({
+    message: "이미지 업로드 준비 중",
+    percent: 0,
+    phase: "uploading",
+    source,
+    status: "active",
+    total
+  })
 }
 
 function isFileDragEvent(event: Event): event is DragEvent {
@@ -507,5 +571,10 @@ function findVisibleModal(): Element | null {
 
 function showConversionError(error: unknown): void {
   console.warn("[dcinside-autowebp] Image conversion failed", error)
+  reportProgress({
+    message: "이미지 처리 실패",
+    phase: "converting",
+    status: "error"
+  })
   window.alert("이미지를 WebP로 변환하지 못해 업로드를 중단했습니다.")
 }
