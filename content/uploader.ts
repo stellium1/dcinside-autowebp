@@ -19,6 +19,8 @@ const DROP_HANDLER_MARKER = "__dc_webp_drop_attached"
 const EDITOR_SELECTOR = ".note-editable, .note-editor"
 const MODAL_SELECTOR = ".note-modal"
 const PASTE_SCOPE_SELECTOR = `${MODAL_SELECTOR}, ${EDITOR_SELECTOR}`
+const SETTINGS_EVENT_NAME = "dcinside-autowebp:settings"
+const UPLOAD_CONTEXT_EVENT_NAME = "dcinside-autowebp:upload-context"
 const DROP_AREA_SELECTOR = [
   ".note-dropzone",
   ".note-editor",
@@ -61,6 +63,7 @@ export async function initUploader(storage: Storage): Promise<void> {
   initialized = true
 
   attachSettingsWatcher(storage)
+  publishPageSettings()
   attachUploadHandlers()
   observeUploaderChanges()
 }
@@ -73,6 +76,7 @@ function attachSettingsWatcher(storage: Storage): void {
     readSettings(storage)
       .then((settings) => {
         currentSettings = settings
+        publishPageSettings()
         attachUploadHandlers()
       })
       .catch((error) => {
@@ -135,8 +139,8 @@ function attachDropHandlers(): void {
     if (markedArea[DROP_HANDLER_MARKER]) continue
 
     markedArea[DROP_HANDLER_MARKER] = true
-    area.addEventListener("dragover", handleFileDragOver)
-    area.addEventListener("drop", (event) => void handleFileDrop(event))
+    area.addEventListener("dragover", handleFileDragOver, true)
+    area.addEventListener("drop", (event) => void handleFileDrop(event), true)
   }
 }
 
@@ -230,7 +234,14 @@ async function handleFileDrop(event: Event): Promise<void> {
   if (!files?.length) return
 
   const fileInput = findVisibleUploadFileInput()
-  if (!fileInput) return
+  const editorDropTarget = fileInput ? null : findEditorDropTarget(event)
+  if (!fileInput && !editorDropTarget) return
+  if (!fileInput) {
+    if (hasConvertibleDropFile(files)) {
+      publishUploadContext("drag")
+    }
+    return
+  }
 
   event.preventDefault()
   event.stopPropagation()
@@ -359,6 +370,13 @@ function findPasteFileInput(event: ClipboardEvent): HTMLInputElement | null {
   return findVisibleUploadFileInput()
 }
 
+function findEditorDropTarget(event: Event): Element | null {
+  const target = event.target instanceof Element ? event.target : null
+  if (!target) return null
+
+  return target.closest(EDITOR_SELECTOR)
+}
+
 function isPasteUploadTarget(
   event: ClipboardEvent,
   fileInput: HTMLInputElement
@@ -436,6 +454,32 @@ function getDroppedFiles(event: Event): FileList | null {
 
   const files = event.dataTransfer?.files
   return files?.length ? files : null
+}
+
+function hasConvertibleDropFile(files: FileList): boolean {
+  return Array.from(files).some((file) => {
+    const uploadFile = ensureImageFileExtension(file)
+    return (
+      isConvertibleImage(uploadFile) ||
+      (uploadFile.type === "" && !hasUploadImageExtension(uploadFile.name))
+    )
+  })
+}
+
+function publishPageSettings(): void {
+  window.dispatchEvent(
+    new CustomEvent(SETTINGS_EVENT_NAME, {
+      detail: JSON.stringify(currentSettings)
+    })
+  )
+}
+
+function publishUploadContext(source: "drag"): void {
+  window.dispatchEvent(
+    new CustomEvent(UPLOAD_CONTEXT_EVENT_NAME, {
+      detail: source
+    })
+  )
 }
 
 function isFileDragEvent(event: Event): event is DragEvent {
