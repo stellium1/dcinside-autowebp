@@ -17,6 +17,7 @@ import {
 import {
   initProgressOverlay,
   reportProgress,
+  setProgressOverlayEnabled,
   type UploadSource
 } from "./progress"
 
@@ -55,6 +56,8 @@ type ProcessFilesOptions = {
   source: UploadSource
 }
 
+type PasteSource = "editor-paste" | "modal-paste"
+
 let currentSettings: Settings = DEFAULT_SETTINGS
 let documentChangeHandlerAttached = false
 let documentPasteHandlerAttached = false
@@ -70,6 +73,7 @@ export async function initUploader(storage: Storage): Promise<void> {
 
   attachSettingsWatcher(storage)
   initProgressOverlay()
+  setProgressOverlayEnabled(currentSettings.showProgress)
   publishPageSettings()
   attachUploadHandlers()
   observeUploaderChanges()
@@ -83,6 +87,7 @@ function attachSettingsWatcher(storage: Storage): void {
     readSettings(storage)
       .then((settings) => {
         currentSettings = settings
+        setProgressOverlayEnabled(settings.showProgress)
         publishPageSettings()
         attachUploadHandlers()
       })
@@ -155,7 +160,7 @@ async function handleFileInputChange(event: Event): Promise<void> {
   if (
     !event.isTrusted ||
     !currentSettings.enabled ||
-    !currentSettings.compressOnUpload
+    !currentSettings.modalFileUpload
   ) {
     return
   }
@@ -169,12 +174,12 @@ async function handleFileInputChange(event: Event): Promise<void> {
     const files = await processFiles(input.files, {
       quality: currentSettings.quality,
       shouldConvert: true,
-      source: "upload"
+      source: "modal-file"
     })
 
     replaceInputFiles(input, files)
-    publishUploadContext("upload", files.length)
-    reportUploadQueued("upload", files.length)
+    publishUploadContext("modal-file", files.length)
+    reportUploadQueued("modal-file", files.length)
     dispatchChange(input)
   } catch (error) {
     showConversionError(error)
@@ -182,16 +187,20 @@ async function handleFileInputChange(event: Event): Promise<void> {
 }
 
 async function handleImagePaste(event: ClipboardEvent): Promise<void> {
-  if (
-    !event.isTrusted ||
-    !currentSettings.enabled ||
-    !currentSettings.compressOnUpload
-  ) {
+  if (!event.isTrusted || !currentSettings.enabled) {
     return
   }
 
   const files = getClipboardImageFiles(event)
   if (files.length === 0) return
+
+  const source = getPasteSource(event)
+  if (!source || !isPasteSourceEnabled(source)) return
+
+  if (source === "editor-paste") {
+    publishUploadContext(source, files.length)
+    return
+  }
 
   const fileInput = findPasteFileInput(event)
   if (!fileInput) return
@@ -206,12 +215,12 @@ async function handleImagePaste(event: ClipboardEvent): Promise<void> {
       forceUnknownImageConversion: true,
       quality: currentSettings.quality,
       shouldConvert: true,
-      source: "paste"
+      source
     })
 
     replaceInputFiles(fileInput, processedFiles)
-    publishUploadContext("paste", processedFiles.length)
-    reportUploadQueued("paste", processedFiles.length)
+    publishUploadContext(source, processedFiles.length)
+    reportUploadQueued(source, processedFiles.length)
     dispatchChange(fileInput)
   } catch (error) {
     showConversionError(error)
@@ -222,7 +231,7 @@ function handleFileDragOver(event: Event): void {
   if (
     !event.isTrusted ||
     !currentSettings.enabled ||
-    !currentSettings.compressOnDrag ||
+    !currentSettings.modalDropUpload ||
     !isFileDragEvent(event)
   ) {
     return
@@ -235,11 +244,7 @@ function handleFileDragOver(event: Event): void {
 }
 
 async function handleFileDrop(event: Event): Promise<void> {
-  if (
-    !event.isTrusted ||
-    !currentSettings.enabled ||
-    !currentSettings.compressOnDrag
-  ) {
+  if (!event.isTrusted || !currentSettings.enabled) {
     return
   }
 
@@ -250,20 +255,24 @@ async function handleFileDrop(event: Event): Promise<void> {
   const editorDropTarget = fileInput ? null : findEditorDropTarget(event)
   if (!fileInput && !editorDropTarget) return
   if (!fileInput) {
+    if (!currentSettings.editorDropUpload) return
+
     if (hasTrackableDropFile(files)) {
-      publishUploadContext("drag", files.length)
+      publishUploadContext("editor-drop", files.length)
       reportProgress({
         current: 0,
         message: "이미지 업로드 준비 중",
         percent: 0,
         phase: "converting",
-        source: "drag",
+        source: "editor-drop",
         status: "active",
         total: files.length
       })
     }
     return
   }
+
+  if (!currentSettings.modalDropUpload) return
 
   event.preventDefault()
   event.stopPropagation()
@@ -273,12 +282,12 @@ async function handleFileDrop(event: Event): Promise<void> {
     const processedFiles = await processFiles(files, {
       quality: currentSettings.quality,
       shouldConvert: true,
-      source: "drag"
+      source: "modal-drop"
     })
 
     replaceInputFiles(fileInput, processedFiles)
-    publishUploadContext("drag", processedFiles.length)
-    reportUploadQueued("drag", processedFiles.length)
+    publishUploadContext("modal-drop", processedFiles.length)
+    reportUploadQueued("modal-drop", processedFiles.length)
     dispatchChange(fileInput)
   } catch (error) {
     showConversionError(error)
@@ -416,6 +425,26 @@ function findPasteFileInput(event: ClipboardEvent): HTMLInputElement | null {
   }
 
   return findVisibleUploadFileInput()
+}
+
+function getPasteSource(event: ClipboardEvent): PasteSource | null {
+  const target = event.target instanceof Element ? event.target : null
+
+  if (target?.closest(MODAL_SELECTOR) || findVisibleModal()) {
+    return "modal-paste"
+  }
+
+  if (target?.closest(EDITOR_SELECTOR)) {
+    return "editor-paste"
+  }
+
+  return findVisibleUploadFileInput() ? "modal-paste" : null
+}
+
+function isPasteSourceEnabled(source: PasteSource): boolean {
+  return source === "modal-paste"
+    ? currentSettings.modalPasteUpload
+    : currentSettings.editorPasteUpload
 }
 
 function findEditorDropTarget(event: Event): Element | null {

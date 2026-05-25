@@ -1,13 +1,22 @@
 import type { PlasmoCSConfig } from "plasmo"
 
 type Settings = {
-  compressOnDrag: boolean
-  compressOnUpload: boolean
+  editorDropUpload: boolean
+  editorPasteUpload: boolean
   enabled: boolean
+  modalDropUpload: boolean
+  modalFileUpload: boolean
+  modalPasteUpload: boolean
   quality: number
+  showProgress: boolean
 }
 
-type UploadSource = "drag" | "paste" | "upload"
+type UploadSource =
+  | "editor-drop"
+  | "editor-paste"
+  | "modal-drop"
+  | "modal-file"
+  | "modal-paste"
 
 type UploadContext = {
   completed: number
@@ -44,10 +53,14 @@ const CONVERTIBLE_IMAGE_TYPE_PATTERN =
 const CONVERTIBLE_IMAGE_EXTENSION_PATTERN = /\.(png|jpe?g|jfif|bmp|avif)$/i
 const UPLOAD_IMAGE_EXTENSION_PATTERN = /\.(png|jpe?g|jfif|bmp|gif|webp)$/i
 const DEFAULT_SETTINGS: Settings = {
-  compressOnDrag: true,
-  compressOnUpload: true,
+  editorDropUpload: true,
+  editorPasteUpload: true,
   enabled: true,
-  quality: 90
+  modalDropUpload: true,
+  modalFileUpload: true,
+  modalPasteUpload: true,
+  quality: 90,
+  showProgress: true
 }
 
 let currentSettings = DEFAULT_SETTINGS
@@ -223,7 +236,14 @@ function getActiveUploadContext(): UploadContext | null {
 }
 
 function shouldConvertContext(context: UploadContext): boolean {
-  return context.source === "drag" && currentSettings.compressOnDrag
+  switch (context.source) {
+    case "editor-drop":
+      return currentSettings.editorDropUpload
+    case "editor-paste":
+      return currentSettings.editorPasteUpload
+    default:
+      return false
+  }
 }
 
 function clearUploadContext(context: UploadContext): void {
@@ -399,18 +419,36 @@ function normalizeFileBaseName(fileName: string): string {
 
 function normalizeSettings(value: unknown): Settings {
   const partial = isObject(value) ? value : {}
+  const legacyDrag = readOptionalBoolean(partial.compressOnDrag)
+  const legacyUpload = readOptionalBoolean(partial.compressOnUpload)
 
   return {
-    compressOnDrag: readBoolean(
-      partial.compressOnDrag,
-      DEFAULT_SETTINGS.compressOnDrag
+    editorDropUpload: readBoolean(
+      partial.editorDropUpload,
+      legacyDrag ?? DEFAULT_SETTINGS.editorDropUpload
     ),
-    compressOnUpload: readBoolean(
-      partial.compressOnUpload,
-      DEFAULT_SETTINGS.compressOnUpload
+    editorPasteUpload: readBoolean(
+      partial.editorPasteUpload,
+      legacyUpload ?? DEFAULT_SETTINGS.editorPasteUpload
     ),
     enabled: readBoolean(partial.enabled, DEFAULT_SETTINGS.enabled),
-    quality: normalizeQuality(partial.quality)
+    modalDropUpload: readBoolean(
+      partial.modalDropUpload,
+      legacyDrag ?? DEFAULT_SETTINGS.modalDropUpload
+    ),
+    modalFileUpload: readBoolean(
+      partial.modalFileUpload,
+      legacyUpload ?? DEFAULT_SETTINGS.modalFileUpload
+    ),
+    modalPasteUpload: readBoolean(
+      partial.modalPasteUpload,
+      legacyUpload ?? DEFAULT_SETTINGS.modalPasteUpload
+    ),
+    quality: normalizeQuality(partial.quality),
+    showProgress: readBoolean(
+      partial.showProgress,
+      DEFAULT_SETTINGS.showProgress
+    )
   }
 }
 
@@ -423,6 +461,10 @@ function normalizeQuality(value: unknown): number {
 
 function readBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback
+}
+
+function readOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -459,9 +501,22 @@ function readUploadContext(
 }
 
 function readUploadSource(value: unknown): UploadSource | null {
-  return value === "drag" || value === "paste" || value === "upload"
-    ? value
-    : null
+  switch (value) {
+    case "editor-drop":
+    case "editor-paste":
+    case "modal-drop":
+    case "modal-file":
+    case "modal-paste":
+      return value
+    case "drag":
+      return "editor-drop"
+    case "paste":
+      return "modal-paste"
+    case "upload":
+      return "modal-file"
+    default:
+      return null
+  }
 }
 
 function readPositiveInteger(value: unknown): number | undefined {

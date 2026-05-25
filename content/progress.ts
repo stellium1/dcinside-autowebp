@@ -1,4 +1,9 @@
-export type UploadSource = "drag" | "paste" | "upload"
+export type UploadSource =
+  | "editor-drop"
+  | "editor-paste"
+  | "modal-drop"
+  | "modal-file"
+  | "modal-paste"
 
 type ProgressPhase = "converting" | "uploading"
 type ProgressStatus = "active" | "done" | "error"
@@ -16,15 +21,26 @@ type ProgressDetail = {
 const PROGRESS_EVENT_NAME = "dcinside-autowebp:progress"
 const OVERLAY_ID = "dcinside-autowebp-progress"
 const STYLE_ID = "dcinside-autowebp-progress-style"
+const VISIBLE_UPLOAD_SURFACE_SELECTOR =
+  ".note-modal, .modal, .ui-dialog, .content_box.img_upcont, #sortable"
 
 let initialized = false
 let hideTimer: number | null = null
+let overlayEnabled = true
 
 export function initProgressOverlay(): void {
   if (initialized) return
   initialized = true
 
   window.addEventListener(PROGRESS_EVENT_NAME, handleProgressEvent)
+}
+
+export function setProgressOverlayEnabled(enabled: boolean): void {
+  overlayEnabled = enabled
+
+  if (!enabled) {
+    hideOverlay()
+  }
 }
 
 export function reportProgress(detail: ProgressDetail): void {
@@ -36,6 +52,8 @@ export function reportProgress(detail: ProgressDetail): void {
 }
 
 function handleProgressEvent(event: Event): void {
+  if (!overlayEnabled) return
+
   const detail = parseProgressDetail(event)
   if (!detail) return
 
@@ -92,6 +110,7 @@ function renderProgress(detail: ProgressDetail): void {
   const meta = overlay.querySelector<HTMLElement>("[data-progress-meta]")
 
   overlay.dataset.status = detail.status
+  overlay.dataset.placement = shouldUseTopPlacement(detail) ? "top" : "bottom"
   overlay.hidden = false
 
   if (title) title.textContent = detail.message ?? getDefaultMessage(detail)
@@ -149,6 +168,14 @@ function ensureProgressStyle(): void {
       color: #e0e0e0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       pointer-events: none;
+    }
+    #${OVERLAY_ID}[data-placement="top"] {
+      top: 18px;
+      bottom: auto;
+    }
+    #${OVERLAY_ID}[data-placement="bottom"] {
+      top: auto;
+      bottom: 18px;
     }
     #${OVERLAY_ID}[hidden] {
       display: none;
@@ -239,10 +266,37 @@ function getDisplayPercent(detail: ProgressDetail): number | null {
 
 function scheduleHide(delayMs: number): void {
   hideTimer = window.setTimeout(() => {
-    const overlay = document.getElementById(OVERLAY_ID)
-    if (overlay) overlay.hidden = true
+    hideOverlay()
     hideTimer = null
   }, delayMs)
+}
+
+function shouldUseTopPlacement(detail: ProgressDetail): boolean {
+  return isModalUploadSource(detail.source) || hasVisibleUploadSurface()
+}
+
+function isModalUploadSource(source: UploadSource | undefined): boolean {
+  return (
+    source === "modal-drop" ||
+    source === "modal-file" ||
+    source === "modal-paste"
+  )
+}
+
+function hasVisibleUploadSurface(): boolean {
+  return Array.from(
+    document.querySelectorAll(VISIBLE_UPLOAD_SURFACE_SELECTOR)
+  ).some((element) => element.getClientRects().length > 0)
+}
+
+function hideOverlay(): void {
+  if (hideTimer !== null) {
+    window.clearTimeout(hideTimer)
+    hideTimer = null
+  }
+
+  const overlay = document.getElementById(OVERLAY_ID)
+  if (overlay) overlay.hidden = true
 }
 
 function clampPercent(value: number | undefined): number | undefined {
@@ -255,9 +309,22 @@ function readNumber(value: unknown): number | undefined {
 }
 
 function readUploadSource(value: unknown): UploadSource | undefined {
-  return value === "drag" || value === "paste" || value === "upload"
-    ? value
-    : undefined
+  switch (value) {
+    case "editor-drop":
+    case "editor-paste":
+    case "modal-drop":
+    case "modal-file":
+    case "modal-paste":
+      return value
+    case "drag":
+      return "editor-drop"
+    case "paste":
+      return "modal-paste"
+    case "upload":
+      return "modal-file"
+    default:
+      return undefined
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

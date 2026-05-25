@@ -30,9 +30,17 @@ export const styles: Record<string, React.CSSProperties> = {
   title: { fontSize: 18, margin: 0, fontWeight: 600 },
   meta: { marginLeft: "auto", fontSize: 12, color: "#bdbdbd" },
   list: { display: "flex", flexDirection: "column", gap: 12 },
+  section: { display: "flex", flexDirection: "column", gap: 8 },
+  sectionTitle: {
+    padding: "0 2px",
+    color: "#bdbdbd",
+    fontSize: 12,
+    fontWeight: 600
+  },
+  sectionList: { display: "flex", flexDirection: "column", gap: 8 },
   optionBox: {
     background: "#2a2a2a",
-    borderRadius: 12,
+    borderRadius: 8,
     padding: "12px 14px",
     display: "flex",
     alignItems: "center",
