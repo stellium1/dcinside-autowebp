@@ -1,10 +1,31 @@
 import type { Storage } from "@plasmohq/storage"
 
-import { readSettings, type Settings } from "../lib/settings"
-import { convertImageToWebp, isConvertibleImage } from "../utils/webp"
+import {
+  DEFAULT_SETTINGS,
+  normalizeSettings,
+  readSettings,
+  SETTINGS_KEYS,
+  type Settings,
+  type SettingsKey
+} from "../lib/settings"
+import {
+  convertImageToWebp,
+  ensureImageFileExtension,
+  hasUploadImageExtension,
+  isConvertibleImage
+} from "../utils/webp"
 
 const DROP_HANDLER_MARKER = "__dc_webp_drop_attached"
-const INPUT_HANDLER_MARKER = "__dc_webp_listener_attached"
+const EDITOR_SELECTOR = ".note-editable, .note-editor"
+const MODAL_SELECTOR = ".note-modal"
+const PASTE_SCOPE_SELECTOR = `${MODAL_SELECTOR}, ${EDITOR_SELECTOR}`
+const DROP_AREA_SELECTOR = [
+  ".note-dropzone",
+  ".note-editor",
+  ".note-editable",
+  ".content_box.img_upcont",
+  "#sortable"
+].join(",")
 const DCINSIDE_FILE_INPUT_SELECTOR = [
   'input[type="file"][name="files[]"]',
   'input[type="file"].note-image-input[name="files"]',
@@ -15,300 +36,434 @@ const IGNORED_FILE_INPUT_SELECTOR = [
   "#autozzal_image_file",
   "#prompt_img_file"
 ].join(",")
-const FILE_INPUT_SELECTOR = 'input[type="file"]'
 
-type MarkedElement = Element & Record<typeof DROP_HANDLER_MARKER, boolean>
-type MarkedFileInput = HTMLInputElement &
-  Record<typeof INPUT_HANDLER_MARKER, boolean>
+type MarkedElement = Element & {
+  [DROP_HANDLER_MARKER]?: boolean
+}
 
-let initialized = false
+type ProcessFilesOptions = {
+  forceUnknownImageConversion?: boolean
+  quality: number
+  shouldConvert: boolean
+}
+
+let currentSettings: Settings = DEFAULT_SETTINGS
 let documentChangeHandlerAttached = false
+let documentPasteHandlerAttached = false
+let initialized = false
+let mutationObserver: MutationObserver | null = null
+let settingsWatchAttached = false
 
 export async function initUploader(storage: Storage): Promise<void> {
-  if (initialized) {
-    return
-  }
+  if (initialized) return
 
-  const settings = await readSettings(storage)
-
-  if (!settings.enabled) {
-    return
-  }
-
+  currentSettings = await readSettings(storage)
   initialized = true
-  attachUploadHandlers(settings)
 
-  const bodyObserver = new MutationObserver(() => {
-    attachUploadHandlers(settings)
-  })
-
-  bodyObserver.observe(document.body, { childList: true, subtree: true })
+  attachSettingsWatcher(storage)
+  attachUploadHandlers()
+  observeUploaderChanges()
 }
 
-function attachUploadHandlers(settings: Settings): void {
-  const uploadArea = findUploadArea()
+function attachSettingsWatcher(storage: Storage): void {
+  if (settingsWatchAttached) return
+  settingsWatchAttached = true
 
-  attachDocumentFileInputHandler(settings)
-  attachDropHandler(uploadArea, settings)
-  attachFileInputHandlers(settings)
-}
-
-function findUploadArea(): Element {
-  return (
-    document.querySelector(".content_box.img_upcont") ||
-    document.querySelector("#sortable") ||
-    document.body
-  )
-}
-
-function findFileInputs(): HTMLInputElement[] {
-  return Array.from(
-    document.querySelectorAll<HTMLInputElement>(DCINSIDE_FILE_INPUT_SELECTOR)
-  ).filter(isUploadFileInput)
-}
-
-function findPrimaryFileInput(): HTMLInputElement | null {
-  return findFileInputs()[0] || null
-}
-
-function isUploadFileInput(input: HTMLInputElement): boolean {
-  return (
-    input.matches(DCINSIDE_FILE_INPUT_SELECTOR) &&
-    !input.matches(IGNORED_FILE_INPUT_SELECTOR)
-  )
-}
-
-function attachDocumentFileInputHandler(settings: Settings): void {
-  if (documentChangeHandlerAttached) {
-    return
+  const refreshSettings = (): void => {
+    readSettings(storage)
+      .then((settings) => {
+        currentSettings = settings
+        attachUploadHandlers()
+      })
+      .catch((error) => {
+        console.warn("[dcinside-autowebp] Failed to refresh settings", error)
+      })
   }
 
+  const callbackMap = SETTINGS_KEYS.reduce(
+    (map, key) => {
+      map[key] = refreshSettings
+      return map
+    },
+    {} as Record<SettingsKey, () => void>
+  )
+
+  storage.watch(callbackMap)
+}
+
+function attachUploadHandlers(): void {
+  attachDocumentFileInputHandler()
+  attachDocumentPasteHandler()
+  attachDropHandlers()
+}
+
+function observeUploaderChanges(): void {
+  if (mutationObserver || !document.body) return
+
+  mutationObserver = new MutationObserver(() => attachUploadHandlers())
+  mutationObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+  })
+}
+
+function attachDocumentFileInputHandler(): void {
+  if (documentChangeHandlerAttached) return
   documentChangeHandlerAttached = true
+
   document.addEventListener(
     "change",
-    async (event: Event) => {
-      try {
-        await handleFileInputChange(event, settings)
-      } catch {}
-    },
+    (event) => void handleFileInputChange(event),
     true
   )
 }
 
-function attachDropHandler(area: Element, settings: Settings): void {
-  const markedArea = area as MarkedElement
+function attachDocumentPasteHandler(): void {
+  if (documentPasteHandlerAttached) return
+  documentPasteHandlerAttached = true
 
-  if (markedArea[DROP_HANDLER_MARKER]) {
-    return
-  }
-
-  markedArea[DROP_HANDLER_MARKER] = true
-  area.addEventListener("dragover", handleFileDragOver, true)
-
-  area.addEventListener(
-    "drop",
-    async (event: DragEvent) => {
-      const files = getDroppedFiles(event)
-      if (!files) {
-        return
-      }
-
-      const fileInput = findPrimaryFileInput()
-      if (!fileInput) {
-        return
-      }
-
-      event.preventDefault()
-      event.stopPropagation()
-      event.stopImmediatePropagation?.()
-
-      const processedFiles = await processFiles(
-        files,
-        settings.compressOnDrag,
-        settings.quality
-      )
-
-      replaceInputFiles(fileInput, processedFiles)
-      dispatchChange(fileInput)
-    },
+  document.addEventListener(
+    "paste",
+    (event) => void handleImagePaste(event),
     true
   )
 }
 
-function attachFileInputHandlers(settings: Settings): void {
-  findFileInputs().forEach((input) => {
-    const markedInput = input as MarkedFileInput
+function attachDropHandlers(): void {
+  for (const area of findDropAreas()) {
+    const markedArea = area as MarkedElement
+    if (markedArea[DROP_HANDLER_MARKER]) continue
 
-    if (markedInput[INPUT_HANDLER_MARKER]) {
-      return
-    }
-
-    markedInput[INPUT_HANDLER_MARKER] = true
-    const addOriginalEventListener = patchChangeListener(input, settings)
-
-    addOriginalEventListener(
-      "change",
-      async (event: Event) => {
-        try {
-          await handleFileInputChange(event, settings, input)
-        } catch {}
-      },
-      { capture: true }
-    )
-  })
-}
-
-function patchChangeListener(
-  input: HTMLInputElement,
-  settings: Settings
-): HTMLInputElement["addEventListener"] {
-  const originalAddEventListener = input.addEventListener.bind(input)
-
-  input.addEventListener = ((type, listener, options) => {
-    if (type !== "change" || !listener) {
-      originalAddEventListener(type, listener, options)
-      return
-    }
-
-    const wrappedListener = async (event: Event) => {
-      try {
-        await handleFileInputChange(event, settings, input)
-      } catch {}
-
-      callEventListener(listener, input, event)
-    }
-
-    originalAddEventListener(type, wrappedListener, options)
-  }) as HTMLInputElement["addEventListener"]
-
-  return originalAddEventListener
-}
-
-async function handleFileInputChange(
-  event: Event,
-  settings: Settings,
-  providedInput?: HTMLInputElement
-): Promise<void> {
-  if (!event.isTrusted || !settings.compressOnUpload) {
-    return
+    markedArea[DROP_HANDLER_MARKER] = true
+    area.addEventListener("dragover", handleFileDragOver)
+    area.addEventListener("drop", (event) => void handleFileDrop(event))
   }
+}
 
-  const input = resolveFileInput(event, providedInput)
+async function handleFileInputChange(event: Event): Promise<void> {
   if (
-    !input ||
-    !isUploadFileInput(input) ||
-    !input.files ||
-    input.files.length === 0
+    !event.isTrusted ||
+    !currentSettings.enabled ||
+    !currentSettings.compressOnUpload
   ) {
     return
   }
 
+  const input = resolveFileInput(event.target)
+  if (!input?.files?.length || !isUploadFileInput(input)) return
+
   event.stopImmediatePropagation()
 
-  const processedFiles = await processFiles(input.files, true, settings.quality)
-  replaceInputFiles(input, processedFiles)
-  dispatchChange(input)
+  try {
+    const files = await processFiles(input.files, {
+      quality: currentSettings.quality,
+      shouldConvert: true
+    })
+
+    replaceInputFiles(input, files)
+    dispatchChange(input)
+  } catch (error) {
+    showConversionError(error)
+  }
+}
+
+async function handleImagePaste(event: ClipboardEvent): Promise<void> {
+  if (
+    !event.isTrusted ||
+    !currentSettings.enabled ||
+    !currentSettings.compressOnUpload
+  ) {
+    return
+  }
+
+  const files = getClipboardImageFiles(event)
+  if (files.length === 0) return
+
+  const fileInput = findPasteFileInput(event)
+  if (!fileInput) return
+  if (!isPasteUploadTarget(event, fileInput)) return
+
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+
+  try {
+    const processedFiles = await processFiles(files, {
+      forceUnknownImageConversion: true,
+      quality: currentSettings.quality,
+      shouldConvert: true
+    })
+
+    replaceInputFiles(fileInput, processedFiles)
+    dispatchChange(fileInput)
+  } catch (error) {
+    showConversionError(error)
+  }
+}
+
+function handleFileDragOver(event: Event): void {
+  if (
+    !event.isTrusted ||
+    !currentSettings.enabled ||
+    !currentSettings.compressOnDrag ||
+    !isFileDragEvent(event)
+  ) {
+    return
+  }
+
+  const fileInput = findVisibleUploadFileInput()
+  if (!fileInput) return
+
+  event.preventDefault()
+}
+
+async function handleFileDrop(event: Event): Promise<void> {
+  if (
+    !event.isTrusted ||
+    !currentSettings.enabled ||
+    !currentSettings.compressOnDrag
+  ) {
+    return
+  }
+
+  const files = getDroppedFiles(event)
+  if (!files?.length) return
+
+  const fileInput = findVisibleUploadFileInput()
+  if (!fileInput) return
+
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+
+  try {
+    const processedFiles = await processFiles(files, {
+      quality: currentSettings.quality,
+      shouldConvert: true
+    })
+
+    replaceInputFiles(fileInput, processedFiles)
+    dispatchChange(fileInput)
+  } catch (error) {
+    showConversionError(error)
+  }
 }
 
 async function processFiles(
-  files: FileList,
-  shouldConvert: boolean,
-  quality: number
+  files: File[] | FileList,
+  options: ProcessFilesOptions
 ): Promise<File[]> {
-  return Promise.all(
-    Array.from(files).map(async (file) => {
-      if (!shouldConvert || !isConvertibleImage(file)) {
-        return file
-      }
+  const processedFiles: File[] = []
 
-      try {
-        return await convertImageToWebp(file, quality)
-      } catch {
-        return file
-      }
+  for (const file of Array.from(files)) {
+    processedFiles.push(await processFile(file, options))
+  }
+
+  return processedFiles
+}
+
+async function processFile(
+  file: File,
+  options: ProcessFilesOptions
+): Promise<File> {
+  const uploadFile = ensureImageFileExtension(file)
+  const needsForcedConversion =
+    options.forceUnknownImageConversion === true &&
+    uploadFile.type === "" &&
+    !hasUploadImageExtension(uploadFile.name)
+  const shouldConvertFile =
+    options.shouldConvert &&
+    (isConvertibleImage(uploadFile) || needsForcedConversion)
+
+  if (!shouldConvertFile) return uploadFile
+
+  try {
+    return ensureImageFileExtension(
+      await convertImageToWebp(
+        uploadFile,
+        normalizeSettings({ quality: options.quality }).quality,
+        needsForcedConversion
+      )
+    )
+  } catch (error) {
+    throw new Error(`Failed to convert ${uploadFile.name || "image"} to WebP`, {
+      cause: error
     })
+  }
+}
+
+function getClipboardImageFiles(event: ClipboardEvent): File[] {
+  const clipboardData = event.clipboardData
+  if (!clipboardData) return []
+
+  const files: File[] = []
+
+  for (const item of Array.from(clipboardData.items)) {
+    const file = getClipboardItemFile(item)
+    if (file && isClipboardImageFile(file)) {
+      files.push(file)
+    }
+  }
+
+  for (const file of Array.from(clipboardData.files)) {
+    if (isClipboardImageFile(file)) {
+      files.push(file)
+    }
+  }
+
+  return dedupeFiles(files)
+}
+
+function getClipboardItemFile(item: DataTransferItem): File | null {
+  if (item.kind !== "file") return null
+
+  try {
+    return item.getAsFile()
+  } catch {
+    return null
+  }
+}
+
+function isClipboardImageFile(file: File): boolean {
+  return file.type === "" || isImageFile(file)
+}
+
+function dedupeFiles(files: File[]): File[] {
+  const seen = new Set<string>()
+
+  return files.filter((file) => {
+    const key = `${file.name}:${file.size}:${file.lastModified}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function findPasteFileInput(event: ClipboardEvent): HTMLInputElement | null {
+  const target = event.target instanceof Element ? event.target : null
+  const modal = target?.closest(MODAL_SELECTOR) ?? findVisibleModal()
+
+  if (modal) {
+    return findVisibleUploadFileInput(modal) ?? findUploadFileInput(modal)
+  }
+
+  const pasteScope = target?.closest(PASTE_SCOPE_SELECTOR)
+  if (pasteScope) {
+    return (
+      findVisibleUploadFileInput(pasteScope) ??
+      findUploadFileInput(pasteScope) ??
+      findUploadFileInput()
+    )
+  }
+
+  return findVisibleUploadFileInput()
+}
+
+function isPasteUploadTarget(
+  event: ClipboardEvent,
+  fileInput: HTMLInputElement
+): boolean {
+  const target = event.target
+  if (!(target instanceof Element)) return isVisibleElement(fileInput)
+
+  return Boolean(
+    target.closest(PASTE_SCOPE_SELECTOR) ||
+    resolveFileInput(target)?.matches(DCINSIDE_FILE_INPUT_SELECTOR) ||
+    findVisibleModal() ||
+    isVisibleElement(fileInput)
   )
+}
+
+function findDropAreas(): Element[] {
+  return Array.from(document.querySelectorAll(DROP_AREA_SELECTOR))
+}
+
+function findVisibleUploadFileInput(
+  root: ParentNode = document
+): HTMLInputElement | null {
+  const inputs = findFileInputs(root)
+
+  return inputs.find(isVisibleElement) ?? null
+}
+
+function findUploadFileInput(
+  root: ParentNode = document
+): HTMLInputElement | null {
+  return findFileInputs(root)[0] ?? null
+}
+
+function findFileInputs(root: ParentNode = document): HTMLInputElement[] {
+  return Array.from(
+    root.querySelectorAll<HTMLInputElement>(DCINSIDE_FILE_INPUT_SELECTOR)
+  ).filter(isUploadFileInput)
+}
+
+function isUploadFileInput(input: HTMLInputElement): boolean {
+  return (
+    input.type === "file" &&
+    input.matches(DCINSIDE_FILE_INPUT_SELECTOR) &&
+    !input.disabled &&
+    !input.matches(IGNORED_FILE_INPUT_SELECTOR)
+  )
+}
+
+function resolveFileInput(target: EventTarget | null): HTMLInputElement | null {
+  if (!(target instanceof HTMLInputElement) || target.type !== "file")
+    return null
+  return target
 }
 
 function replaceInputFiles(input: HTMLInputElement, files: File[]): void {
   const dataTransfer = new DataTransfer()
 
-  files.forEach((file) => dataTransfer.items.add(file))
+  for (const file of files) {
+    dataTransfer.items.add(file)
+  }
+
   input.files = dataTransfer.files
 }
 
 function dispatchChange(input: HTMLInputElement): void {
-  setTimeout(() => {
-    input.dispatchEvent(new Event("change", { bubbles: true }))
-  }, 0)
+  input.dispatchEvent(
+    new Event("change", {
+      bubbles: true
+    })
+  )
 }
 
-function resolveFileInput(
-  event: Event,
-  providedInput?: HTMLInputElement
-): HTMLInputElement | null {
-  if (providedInput) {
-    return providedInput
-  }
-
-  if (event.currentTarget instanceof HTMLInputElement) {
-    return event.currentTarget
-  }
-
-  if (event.target instanceof HTMLInputElement) {
-    return event.target
-  }
-
-  if (event.target instanceof Element) {
-    return event.target.closest<HTMLInputElement>(FILE_INPUT_SELECTOR)
-  }
-
-  return document.activeElement instanceof HTMLInputElement
-    ? document.activeElement
-    : null
-}
-
-function callEventListener(
-  listener: EventListenerOrEventListenerObject,
-  target: HTMLInputElement,
-  event: Event
-): void {
-  try {
-    if (typeof listener === "function") {
-      listener.call(target, event)
-      return
-    }
-
-    listener.handleEvent(event)
-  } catch {}
-}
-
-function handleFileDragOver(event: DragEvent): void {
-  if (!isFileDragEvent(event) || !findPrimaryFileInput()) {
-    return
-  }
-
-  event.preventDefault()
-}
-
-function getDroppedFiles(event: DragEvent): FileList | null {
-  if (!isFileDragEvent(event)) {
-    return null
-  }
+function getDroppedFiles(event: Event): FileList | null {
+  if (!isFileDragEvent(event)) return null
 
   const files = event.dataTransfer?.files
-  return files && files.length > 0 ? files : null
+  return files?.length ? files : null
 }
 
-function isFileDragEvent(event: DragEvent): boolean {
-  const dataTransfer = event.dataTransfer
-  if (!dataTransfer) {
-    return false
-  }
+function isFileDragEvent(event: Event): event is DragEvent {
+  return (
+    event instanceof DragEvent &&
+    Array.from(event.dataTransfer?.types ?? []).includes("Files")
+  )
+}
 
-  if (Array.from(dataTransfer.types).includes("Files")) {
-    return true
-  }
+function isImageFile(file: File): boolean {
+  return file.type.toLowerCase().startsWith("image/")
+}
 
-  return Array.from(dataTransfer.items).some((item) => item.kind === "file")
+function isVisibleElement(element: Element): boolean {
+  return element.getClientRects().length > 0
+}
+
+function findVisibleModal(): Element | null {
+  return (
+    Array.from(document.querySelectorAll(MODAL_SELECTOR)).find(
+      isVisibleElement
+    ) ?? null
+  )
+}
+
+function showConversionError(error: unknown): void {
+  console.warn("[dcinside-autowebp] Image conversion failed", error)
+  window.alert(
+    "\uc774\ubbf8\uc9c0\ub97c WebP\ub85c \ubcc0\ud658\ud558\uc9c0 \ubabb\ud574 \uc5c5\ub85c\ub4dc\ub97c \uc911\ub2e8\ud588\uc2b5\ub2c8\ub2e4."
+  )
 }
