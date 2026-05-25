@@ -250,7 +250,5 @@ function getEventDetail(event: Event): unknown {
 
 function showConversionError(error: unknown): void {
   console.warn("[dcinside-autowebp] Image conversion failed", error)
-  window.alert(
-    "\uc774\ubbf8\uc9c0\ub97c WebP\ub85c \ubcc0\ud658\ud558\uc9c0 \ubabb\ud574 \uc5c5\ub85c\ub4dc\ub97c \uc911\ub2e8\ud588\uc2b5\ub2c8\ub2e4."
-  )
+  window.alert("이미지를 WebP로 변환하지 못해 업로드를 중단했습니다.")
 }
